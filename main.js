@@ -48,10 +48,116 @@ renderer.setRenderTarget(renderTargetTarget);
 renderer.render(scene3D, camera3D);
 scene3D.remove(targetMesh);
 
-// reset renderer target to screen so we render quad
+const vSdfMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    sourceTex: { value: null },
+    targetTex: { value: null },
+    uResolution: { value: new THREE.Vector2(width, height) }
+  },
+  vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D sourceTex;
+    uniform sampler2D targetTex;
+    uniform vec2 uResolution;
+    varying vec2 vUv;
+
+    float getSDF(sampler2D tex, vec2 uv) {
+      vec2 texel = 1.0 / uResolution;
+      bool isInside = texture2D(tex, uv).r > 0.0;
+      
+      float minD = 200.0; // The pixel radius distance scanning range
+
+      // scan surrounding box to determine spatial proximity to a border
+      for (float x = -minD; x <= minD; x += 5.0) {
+        for (float y = -minD; y <= minD; y += 5.0) {
+          vec2 offset = vec2(x, y);
+          vec2 sampleUv = uv + offset * texel;
+
+          if (sampleUv.x < 0.0 || sampleUv.x > 1.0 || sampleUv.y < 0.0 || sampleUv.y > 1.0) {
+            break;
+          }
+          
+          bool sampleInside = texture2D(tex, clamp(sampleUv, 0.0, 1.0)).r > 0.0;
+          
+          if (isInside != sampleInside) {
+            minD = min(minD, length(offset));
+          }
+        }
+      }
+      
+      return isInside ? -minD : minD;
+    }
+
+    void main() {
+      float sourceTexel = texture2D(sourceTex, vUv).r;
+      float targetTexel = texture2D(targetTex, vUv).r;
+
+      if (sourceTexel == targetTexel) {
+        if (targetTexel > 0.5) {
+          gl_FragColor = vec4(vec3(-200.0), 1.0);
+          return;
+        }
+        gl_FragColor = vec4(vec3(200.0), 1.0);
+        return;
+      }
+      gl_FragColor = vec4(vec3(getSDF(sourceTex, vUv)), 1.0);
+    }
+  `
+});
+
+// Allocate floating-point targets to store exact mathematical distances cleanly on the GPU
+const rtSourceSDF = new THREE.WebGLRenderTarget(width, height, { type: THREE.FloatType });
+const rtTargetSDF = new THREE.WebGLRenderTarget(width, height, { type: THREE.FloatType });
+
+const bakeScene = new THREE.Scene();
+const bakeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), vSdfMaterial);
+bakeScene.add(bakeQuad);
+
+
+vSdfMaterial.uniforms.sourceTex.value = renderTargetSource.texture;
+vSdfMaterial.uniforms.targetTex.value = renderTargetTarget.texture;
+renderer.setRenderTarget(rtSourceSDF);
+renderer.render(bakeScene, screenCamera);
+
+vSdfMaterial.uniforms.sourceTex.value = renderTargetTarget.texture;
+vSdfMaterial.uniforms.targetTex.value = renderTargetSource.texture;
+renderer.setRenderTarget(rtTargetSDF);
+renderer.render(bakeScene, screenCamera);
+
+// renderTargetSource.dispose();
+// renderTargetTarget.dispose();
 renderer.setRenderTarget(null);
 
 const screenShaderMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    tSourceSDF: { value: rtSourceSDF.texture },
+    tTargetSDF: { value: rtTargetSDF.texture },
+    mixAmount: { value: 0.0 }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tSourceSDF;
+    uniform sampler2D tTargetSDF;
+    uniform float mixAmount;
+    varying vec2 vUv;
+
+    void main() {
+      float dSource = texture2D(tSourceSDF, vUv).r;
+      float dTarget = texture2D(tTargetSDF, vUv).r;
+
+      float morphedDistance = mix(dSource, dTarget, mixAmount);
+      float finalMask = morphedDistance <= 0.0 ? 1.0 : 0.0;
+
+      gl_FragColor = vec4(vec3(finalMask), 1.0);
+    }
+  `
+});
+
+
+const screenShaderMaterialOld = new THREE.ShaderMaterial({
   uniforms: {
     tSource: { value: renderTargetSource.texture },
     tTarget: { value: renderTargetTarget.texture },
@@ -76,17 +182,19 @@ const screenShaderMaterial = new THREE.ShaderMaterial({
     // Returns a negative distance inside the white mask, and positive distance outside.
     float getSDF(sampler2D tex, vec2 uv) {
       vec2 texel = 1.0 / uResolution;
-
-      // if this pixel inside shape mask
       bool isInside = texture2D(tex, uv).r > 0.0;
       
-      float minD = 100.0; // The pixel radius distance scanning range
+      float minD = 200.0; // The pixel radius distance scanning range
 
       // scan surrounding box to determine spatial proximity to a border
       for (float x = -minD; x <= minD; x += minD / 20.0) {
         for (float y = -minD; y <= minD; y += minD / 20.0) {
           vec2 offset = vec2(x, y);
           vec2 sampleUv = uv + offset * texel;
+
+          if (sampleUv.x < 0.0 || sampleUv.x > 1.0 || sampleUv.y < 0.0 || sampleUv.y > 1.0) {
+            break;
+          }
           
           float sampleVal = texture2D(tex, clamp(sampleUv, 0.0, 1.0)).r;
           bool sampleInside = sampleVal > 0.0;
@@ -116,8 +224,6 @@ const screenShaderMaterial = new THREE.ShaderMaterial({
       // forces shapes to structurally expand, erode, and collapse gaps.
       float morphedDistance = mix(dSource, dTarget, mixAmount);
 
-      // Re-render crisp binary mask based on morphed distance properties
-      // Anything inside moving distance threshold outputs a pure white pixel
       float finalMask = morphedDistance <= 0.0 ? 1.0 : 0.0;
 
       gl_FragColor = vec4(vec3(finalMask), 1.0);
@@ -149,6 +255,6 @@ window.addEventListener('resize', () => {
   renderer.setSize(w, h);
   renderTargetSource.setSize(w, h);
   renderTargetTarget.setSize(w, h);
-  screenShaderMaterial.uniforms.uResolution.value.set(w, h);
+  // screenShaderMaterial.uniforms.uResolution.value.set(w, h);
 });
 
