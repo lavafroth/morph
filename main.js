@@ -1,10 +1,8 @@
 import * as THREE from 'three';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-
 const width = window.innerWidth;
 const height = window.innerHeight;
-
 renderer.setSize(width, height);
 document.body.appendChild(renderer.domElement);
 
@@ -25,108 +23,148 @@ scene3D.add(light, new THREE.AmbientLight(0x404040));
 
 const whiteMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
 
-// actual 3d models
-// const sourceGeometry = new THREE.BoxGeometry(1, 1, 1);
-const sourceGeometry = new THREE.TorusGeometry( 1, 0.2, 16, 48 );
+// const sourceGeometry = new THREE.TorusGeometry(1, 0.2, 16, 48);
+const sourceGeometry = new THREE.BoxGeometry(1, 1, 1);
 const sourceMesh = new THREE.Mesh(sourceGeometry, whiteMaterial);
-
-sourceMesh.rotation.y = 0.25;
-sourceMesh.rotation.x = 0.3;
+sourceMesh.rotation.set(0.3, 0.25, 0);
 
 const targetGeometry = new THREE.IcosahedronGeometry(1.2, 1);
 const targetMesh = new THREE.Mesh(targetGeometry, whiteMaterial);
 
-// capture source
-scene3D.add(sourceMesh);
-renderer.setRenderTarget(renderTargetSource);
-renderer.render(scene3D, camera3D);
-scene3D.remove(sourceMesh);
+function renderToBuffer(mesh, target) {
+  scene3D.add(mesh);
+  renderer.setRenderTarget(target);
+  renderer.render(scene3D, camera3D);
+  scene3D.remove(mesh);
+}
 
-// capture target
-scene3D.add(targetMesh);
-renderer.setRenderTarget(renderTargetTarget);
-renderer.render(scene3D, camera3D);
-scene3D.remove(targetMesh);
+renderToBuffer(sourceMesh, renderTargetSource);
+renderToBuffer(targetMesh, renderTargetTarget);
 
-const vSdfMaterial = new THREE.ShaderMaterial({
+renderer.setRenderTarget(null);
+
+// createOutlineArrayTexture extracts outlines and saves them to a 512x512 texture array
+function createOutlineArrayTexture(renderTarget) {
+  const pixels = new Uint8Array(width * height * 4);
+  renderer.readRenderTargetPixels(renderTarget, 0, 0, width, height, pixels);
+
+  const outlinePoints = [];
+  
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (y * width + x) * 4;
+
+      if (!pixels[idx]) continue;
+      
+      const left  = pixels[(y * width + (x - 1)) * 4];
+      const right = pixels[(y * width + (x + 1)) * 4];
+      const up    = pixels[((y + 1) * width + x) * 4];
+      const down  = pixels[((y - 1) * width + x) * 4];
+
+      if (left && right && up && down) continue;
+
+      // atleast one neighbor is 0 => current pixel is outline
+      outlinePoints.push({ x: x / width, y: y / height });
+    }
+  }
+
+  const dataTextureBuffer = new Float32Array(512 * 512 * 4);
+
+  // rgba = xy_? where `?` indicates existence
+  for (let i = 0; i < outlinePoints.length && i < 512 * 512; i++) {
+    dataTextureBuffer[i * 4 + 0] = outlinePoints[i].x;
+    dataTextureBuffer[i * 4 + 1] = outlinePoints[i].y;
+    dataTextureBuffer[i * 4 + 3] = 1.0;
+  }
+
+  const texture = new THREE.DataTexture(dataTextureBuffer, 512, 512, THREE.RGBAFormat, THREE.FloatType);
+  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.NearestFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+const tSourceOutlineArray = createOutlineArrayTexture(renderTargetSource);
+const tTargetOutlineArray = createOutlineArrayTexture(renderTargetTarget);
+
+const sdfBakeMaterial = new THREE.ShaderMaterial({
   uniforms: {
-    sourceTex: { value: null },
-    targetTex: { value: null },
+    tOutlineArray: { value: null },
+    tShapeMask: { value: null },
     uResolution: { value: new THREE.Vector2(width, height) }
   },
-  vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
+  `,
   fragmentShader: `
-    uniform sampler2D sourceTex;
-    uniform sampler2D targetTex;
+    uniform sampler2D tOutlineArray;
+    uniform sampler2D tShapeMask;
     uniform vec2 uResolution;
     varying vec2 vUv;
 
-    float getSDF(sampler2D tex, vec2 uv) {
-      vec2 texel = 1.0 / uResolution;
-      bool isInside = texture2D(tex, uv).r > 0.0;
-      
-      float minD = 200.0; // The pixel radius distance scanning range
-
-      // scan surrounding box to determine spatial proximity to a border
-      for (float x = -minD; x <= minD; x += 5.0) {
-        for (float y = -minD; y <= minD; y += 5.0) {
-          vec2 offset = vec2(x, y);
-          vec2 sampleUv = uv + offset * texel;
-
-          if (sampleUv.x < 0.0 || sampleUv.x > 1.0 || sampleUv.y < 0.0 || sampleUv.y > 1.0) {
-            break;
-          }
-          
-          bool sampleInside = texture2D(tex, clamp(sampleUv, 0.0, 1.0)).r > 0.0;
-          
-          if (isInside != sampleInside) {
-            minD = min(minD, length(offset));
-          }
-        }
-      }
-      
-      return isInside ? -minD : minD;
+    vec4 getArrayEntry(int linearIndex) {
+      float i = float(linearIndex);
+      float x = mod(i, 512.0);
+      float y = floor(i / 512.0);
+      vec2 lookupUv = (vec2(x, y) + 0.5) / 512.0;
+      return texture2D(tOutlineArray, lookupUv);
     }
 
     void main() {
-      float sourceTexel = texture2D(sourceTex, vUv).r;
-      float targetTexel = texture2D(targetTex, vUv).r;
+      float aspect = uResolution.x / uResolution.y;
+      float calculatedDist = 9999.0;
 
-      if (sourceTexel == targetTexel) {
-        if (targetTexel > 0.5) {
-          gl_FragColor = vec4(vec3(-200.0), 1.0);
-          return;
-        }
-        gl_FragColor = vec4(vec3(200.0), 1.0);
-        return;
+      for (int i = 0; i < 4096; i++) {
+        vec4 entry = getArrayEntry(i);
+
+        if (entry.a == 0.0) break; // refer to definition rgba = xy_?
+
+        vec2 diff = entry.xy - vUv;
+        diff.y /= aspect;
+        calculatedDist = min(calculatedDist, length(diff * uResolution.x));
       }
-      gl_FragColor = vec4(vec3(getSDF(sourceTex, vUv)), 1.0);
+
+      if (texture2D(tShapeMask, vUv).r > 0.5) {
+        calculatedDist = -calculatedDist;
+      }
+
+      gl_FragColor = vec4(vec3(calculatedDist), 1.0);
     }
   `
 });
 
-// Allocate floating-point targets to store exact mathematical distances cleanly on the GPU
-const rtSourceSDF = new THREE.WebGLRenderTarget(width, height, { type: THREE.FloatType });
-const rtTargetSDF = new THREE.WebGLRenderTarget(width, height, { type: THREE.FloatType });
+const createSdfTarget = () => new THREE.WebGLRenderTarget(width, height, {
+  type: THREE.FloatType,
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter
+});
+
+const rtSourceSDF = createSdfTarget();
+const rtTargetSDF = createSdfTarget();
 
 const bakeScene = new THREE.Scene();
-const bakeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), vSdfMaterial);
+const bakeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), sdfBakeMaterial);
 bakeScene.add(bakeQuad);
 
+function bakeSDF(arrayTexture, rawMaskRT, finalSdfRT) {
+  renderer.setRenderTarget(null);
+  
+  sdfBakeMaterial.uniforms.tOutlineArray.value = arrayTexture;
+  sdfBakeMaterial.uniforms.tShapeMask.value = rawMaskRT.texture;
+  
+  renderer.setRenderTarget(finalSdfRT);
+  renderer.render(bakeScene, screenCamera);
+  renderer.setRenderTarget(null);
+}
 
-vSdfMaterial.uniforms.sourceTex.value = renderTargetSource.texture;
-vSdfMaterial.uniforms.targetTex.value = renderTargetTarget.texture;
-renderer.setRenderTarget(rtSourceSDF);
-renderer.render(bakeScene, screenCamera);
+bakeSDF(tSourceOutlineArray, renderTargetSource, rtSourceSDF);
+bakeSDF(tTargetOutlineArray, renderTargetTarget, rtTargetSDF);
 
-vSdfMaterial.uniforms.sourceTex.value = renderTargetTarget.texture;
-vSdfMaterial.uniforms.targetTex.value = renderTargetSource.texture;
-renderer.setRenderTarget(rtTargetSDF);
-renderer.render(bakeScene, screenCamera);
-
-// renderTargetSource.dispose();
-// renderTargetTarget.dispose();
-renderer.setRenderTarget(null);
+tSourceOutlineArray.dispose();
+tTargetOutlineArray.dispose();
+renderTargetSource.dispose();
+renderTargetTarget.dispose();
 
 const screenShaderMaterial = new THREE.ShaderMaterial({
   uniforms: {
@@ -140,93 +178,24 @@ const screenShaderMaterial = new THREE.ShaderMaterial({
   `,
   fragmentShader: `
     uniform sampler2D tSourceSDF;
-    uniform sampler2D tTargetSDF;
+    uniform sampler2D tTargetSDF; 
     uniform float mixAmount;
     varying vec2 vUv;
 
     void main() {
-      float dSource = texture2D(tSourceSDF, vUv).r;
-      float dTarget = texture2D(tTargetSDF, vUv).r;
+      float distS = texture2D(tSourceSDF, vUv).r;
+      float distT = texture2D(tTargetSDF, vUv).r;
 
-      float morphedDistance = mix(dSource, dTarget, mixAmount);
-      float finalMask = morphedDistance <= 0.0 ? 1.0 : 0.0;
+      float morphedDistance = mix(distS, distT, mixAmount);
 
-      gl_FragColor = vec4(vec3(finalMask), 1.0);
-    }
-  `
-});
-
-
-const screenShaderMaterialOld = new THREE.ShaderMaterial({
-  uniforms: {
-    tSource: { value: renderTargetSource.texture },
-    tTarget: { value: renderTargetTarget.texture },
-    mixAmount: { value: 0.0 },
-    uResolution: { value: new THREE.Vector2(width, height) }
-  },
-  vertexShader: `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: `
-    uniform sampler2D tSource;
-    uniform sampler2D tTarget;
-    uniform float mixAmount;
-    uniform vec2 uResolution;
-    varying vec2 vUv;
-
-    // Approximates the distance field of the solid mask.
-    // Returns a negative distance inside the white mask, and positive distance outside.
-    float getSDF(sampler2D tex, vec2 uv) {
-      vec2 texel = 1.0 / uResolution;
-      bool isInside = texture2D(tex, uv).r > 0.0;
       
-      float minD = 200.0; // The pixel radius distance scanning range
-
-      // scan surrounding box to determine spatial proximity to a border
-      for (float x = -minD; x <= minD; x += minD / 20.0) {
-        for (float y = -minD; y <= minD; y += minD / 20.0) {
-          vec2 offset = vec2(x, y);
-          vec2 sampleUv = uv + offset * texel;
-
-          if (sampleUv.x < 0.0 || sampleUv.x > 1.0 || sampleUv.y < 0.0 || sampleUv.y > 1.0) {
-            break;
-          }
-          
-          float sampleVal = texture2D(tex, clamp(sampleUv, 0.0, 1.0)).r;
-          bool sampleInside = sampleVal > 0.0;
-          
-          if (isInside != sampleInside) {
-            minD = min(minD, length(offset));
-          }
-        }
-      }
+      // float finalAlpha = morphedDistance < 0.001 ? 1.0 : 0.;
+      // the code below is equivalent to the above + anti aliasing
       
-      return isInside ? -minD : minD;
-    }
-
-    void main() {
-      float sourceTexel = texture2D(tSource, vUv).r;
-      float targetTexel = texture2D(tTarget, vUv).r;
-
-      if (sourceTexel == targetTexel) {
-        gl_FragColor = vec4(vec3(targetTexel), 1.0);
-        return;
-      }
-      
-      float dSource = getSDF(tSource, vUv);
-      float dTarget = getSDF(tTarget, vUv);
-
-      // interpolate spatial layout metrics rather than image textures.
-      // forces shapes to structurally expand, erode, and collapse gaps.
-      float morphedDistance = mix(dSource, dTarget, mixAmount);
-
-      float finalMask = morphedDistance <= 0.0 ? 1.0 : 0.0;
-
-      gl_FragColor = vec4(vec3(finalMask), 1.0);
+      float delta = fwidth(morphedDistance);
+      float epsilon = 0.001; 
+      float finalAlpha = smoothstep(epsilon + delta, epsilon - delta, morphedDistance);
+      gl_FragColor = vec4(vec3(finalAlpha), 1.0);
     }
   `
 });
@@ -243,6 +212,7 @@ function animate() {
   const elapsedTime = clock.getElapsedTime();
   const cycleTime = elapsedTime % durationSeconds;
   const progress = Math.abs((cycleTime / 2.0) - 1.0);
+  
   screenShaderMaterial.uniforms.mixAmount.value = progress;
   renderer.render(screenScene, screenCamera);
 }
@@ -253,8 +223,6 @@ window.addEventListener('resize', () => {
   const w = window.innerWidth;
   const h = window.innerHeight;
   renderer.setSize(w, h);
-  renderTargetSource.setSize(w, h);
-  renderTargetTarget.setSize(w, h);
-  // screenShaderMaterial.uniforms.uResolution.value.set(w, h);
+  screenShaderMaterial.uniforms.uResolution.value.set(w, h);
 });
 
