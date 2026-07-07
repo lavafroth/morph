@@ -10,4 +10,8 @@ npx vite
 ```
 
 You may change the meshes to anything you wish, including detailed meshes like teapots.
-The default is a cube morphing into an icosahedron.
+The default is a glock morphing into an icosahedron.
+
+# Credits
+
+Example Mesh: Rigged Glock by J-Toastie [CC-BY] (https://creativecommons.org/licenses/by/3.0/) via Poly Pizza (https://poly.pizza/m/FpMvDqjZFr)
