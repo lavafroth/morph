@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 
+import modelUrl from './mesh.glb?url';
+import loadMesh from './loader';
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 const width = window.innerWidth;
 const height = window.innerHeight;
@@ -24,8 +27,27 @@ scene3D.add(light, new THREE.AmbientLight(0x404040));
 const whiteMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
 
 // const sourceGeometry = new THREE.TorusGeometry(1, 0.2, 16, 48);
-const sourceGeometry = new THREE.BoxGeometry(1, 1, 1);
-const sourceMesh = new THREE.Mesh(sourceGeometry, whiteMaterial);
+
+// const sourceGeometry = new THREE.BoxGeometry(1, 1, 1);
+// const sourceMesh = new THREE.Mesh(sourceGeometry, whiteMaterial);
+
+const sourceMesh = await loadMesh(modelUrl);
+
+sourceMesh.traverse((child) => {
+  if (!child.isMesh) return;
+
+  if (child.material) {
+    if (Array.isArray(child.material)) {
+      child.material.forEach(mat => mat.dispose());
+      return;
+    }
+    child.material.dispose();
+  }
+
+  // Assign the plain white material
+  child.material = whiteMaterial;
+});
+
 sourceMesh.rotation.set(0.3, 0.25, 0);
 
 const targetGeometry = new THREE.IcosahedronGeometry(1.2, 1);
