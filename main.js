@@ -2,6 +2,7 @@ import * as THREE from 'three';
 
 import modelUrl from './mesh.glb?url';
 import loadMesh from './loader';
+import defaultVertexShader from './default.vert?raw';
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 const width = window.innerWidth;
@@ -113,10 +114,7 @@ const sdfBakeMaterial = new THREE.ShaderMaterial({
     tShapeMask: { value: null },
     uResolution: { value: new THREE.Vector2(width, height) }
   },
-  vertexShader: `
-    varying vec2 vUv;
-    void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
-  `,
+  vertexShader: defaultVertexShader,
   fragmentShader: `
     uniform sampler2D tOutlineArray;
     uniform sampler2D tShapeMask;
@@ -192,10 +190,7 @@ const screenShaderMaterial = new THREE.ShaderMaterial({
     tTargetSDF: { value: rtTargetSDF.texture },
     mixAmount: { value: 0.0 }
   },
-  vertexShader: `
-    varying vec2 vUv;
-    void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
-  `,
+  vertexShader: defaultVertexShader,
   fragmentShader: `
     uniform sampler2D tSourceSDF;
     uniform sampler2D tTargetSDF; 
@@ -233,7 +228,7 @@ function animate() {
   const cycleTime = elapsedTime % durationSeconds;
   const progress = Math.abs((cycleTime / 2.0) - 1.0);
   
-  screenShaderMaterial.uniforms.mixAmount.value = progress;
+  screenShaderMaterial.uniforms.mixAmount.value = progress * progress;
   renderer.render(screenScene, screenCamera);
 }
 
