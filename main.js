@@ -3,6 +3,8 @@ import * as THREE from 'three';
 import modelUrl from './mesh.glb?url';
 import loadMesh from './loader';
 import defaultVertexShader from './default.vert?raw';
+import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
+
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 const width = window.innerWidth;
@@ -161,18 +163,16 @@ const createSdfTarget = () => new THREE.WebGLRenderTarget(width, height, {
 const rtSourceSDF = createSdfTarget();
 const rtTargetSDF = createSdfTarget();
 
-const bakeScene = new THREE.Scene();
-const bakeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), sdfBakeMaterial);
-bakeScene.add(bakeQuad);
+const bakeQuad = new FullScreenQuad(sdfBakeMaterial);
 
 function bakeSDF(arrayTexture, rawMaskRT, finalSdfRT) {
   renderer.setRenderTarget(null);
   
   sdfBakeMaterial.uniforms.tOutlineArray.value = arrayTexture;
   sdfBakeMaterial.uniforms.tShapeMask.value = rawMaskRT.texture;
-  
   renderer.setRenderTarget(finalSdfRT);
-  renderer.render(bakeScene, screenCamera);
+  bakeQuad.render(renderer);
+
   renderer.setRenderTarget(null);
 }
 
@@ -215,10 +215,7 @@ const screenShaderMaterial = new THREE.ShaderMaterial({
   `
 });
 
-const quadGeometry = new THREE.PlaneGeometry(2, 2);
-const quadMesh = new THREE.Mesh(quadGeometry, screenShaderMaterial);
-screenScene.add(quadMesh);
-
+const toScreenQuad = new FullScreenQuad(screenShaderMaterial);
 const durationSeconds = 4.0;
 
 function animate() {
@@ -227,9 +224,9 @@ function animate() {
   const elapsedTime = clock.getElapsedTime();
   const cycleTime = elapsedTime % durationSeconds;
   const progress = Math.abs((cycleTime / 2.0) - 1.0);
-  
+
   screenShaderMaterial.uniforms.mixAmount.value = progress * progress;
-  renderer.render(screenScene, screenCamera);
+  toScreenQuad.render(renderer);
 }
 
 animate();
