@@ -63,8 +63,6 @@ function renderToBuffer(mesh, target) {
 renderToBuffer(sourceMesh, renderTargetSource);
 renderToBuffer(targetMesh, renderTargetTarget);
 
-renderer.setRenderTarget(null);
-
 // createOutlineArrayTexture extracts outlines and saves them to a 512x512 texture array
 function createOutlineArrayTexture(renderTarget) {
   const pixels = new Uint8Array(width * height * 4);
