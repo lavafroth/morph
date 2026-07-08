@@ -40,11 +40,11 @@ function renderToBuffer(mesh) {
   return buf;
 }
 
-// const sourceGeometry = new THREE.TorusGeometry(1, 0.3, 12, 48);
+const sourceGeometry = new THREE.TorusGeometry(1, 0.3, 12, 48);
 
 // const sourceGeometry = new THREE.BoxGeometry(1, 1, 1);
-// const sourceMesh = new THREE.Mesh(sourceGeometry, new THREE.MeshStandardMaterial({ color: 0xf19ec8 }));
-const sourceMesh = await loadMesh(modelUrl);
+const sourceMesh = new THREE.Mesh(sourceGeometry, new THREE.MeshStandardMaterial({ color: 0xf19ec8 }));
+// const sourceMesh = await loadMesh(modelUrl);
 const targetGeometry = new THREE.IcosahedronGeometry(1.2, 1);
 const targetMesh = new THREE.Mesh(targetGeometry, new THREE.MeshStandardMaterial({ color: 0xffa500, flatShading: true }));
 sourceMesh.rotation.set(0.3, 0.25, 0);
@@ -193,49 +193,80 @@ uniform float mixAmount;
 uniform vec2 uResolution;
 varying vec2 vUv;
 
+// counter clockwise
+const vec2 RIGHT = vec2(1.0, 0.0);
+const vec2 UP = vec2(0.0, 1.0);
+const vec2 LEFT = vec2(-1.0, 0.0);
+const vec2 DOWN = vec2(0.0, -1.0);
+
+const float maxBlurRadius = 8.0;
+
+// pseudo kawase because downsampling is handled by textureLod mipmaps
+vec4 pseudoKawase(sampler2D tex, vec2 uv, float blurRadius, vec2 resolution) {
+    vec2 halfTexel = 0.5 / resolution;
+    vec2 offset = blurRadius / resolution;
+
+    vec4 sum = vec4(0.0);
+    sum += textureLod(tex, uv + vec2(-offset.x,  offset.y) * 0.5, blurRadius * 0.5);
+    sum += textureLod(tex, uv + vec2( offset.x,  offset.y) * 0.5, blurRadius * 0.5);
+    sum += textureLod(tex, uv + vec2(-offset.x, -offset.y) * 0.5, blurRadius * 0.5);
+    sum += textureLod(tex, uv + vec2( offset.x, -offset.y) * 0.5, blurRadius * 0.5);
+
+    sum += textureLod(tex, uv + offset * RIGHT, blurRadius * 0.5) * 2.0;
+    sum += textureLod(tex, uv + offset * UP,    blurRadius * 0.5) * 2.0;
+    sum += textureLod(tex, uv + offset * LEFT,  blurRadius * 0.5) * 2.0;
+    sum += textureLod(tex, uv + offset * DOWN,  blurRadius * 0.5) * 2.0;
+
+    return sum / 12.0;
+}
+
+float sourceSDF(vec2 uv) {
+  return texture(tSourceSDF, uv).r;
+}
+
+float targetSDF(vec2 uv) {
+  return texture(tTargetSDF, uv).r;
+}
 
 void main() {
-
-  float distS = texture(tSourceSDF, vUv).r;
-  float distT = texture(tTargetSDF, vUv).r;
+  float distS = sourceSDF(vUv);
+  float distT = targetSDF(vUv);
 
   float morphedDistance = mix(distS, distT, mixAmount);
+
+  // anti-alias around the edges
   float delta = fwidth(morphedDistance);
   float epsilon = 0.001; 
   float finalAlpha = smoothstep(epsilon + delta, epsilon - delta, morphedDistance);
 
   vec2 texelSize = 1.5 / uResolution;
-  
-  float dSl = texture(tSourceSDF, vUv - vec2(texelSize.x, 0.0)).r;
-  float dSr = texture(tSourceSDF, vUv + vec2(texelSize.x, 0.0)).r;
-  float dSd = texture(tSourceSDF, vUv - vec2(0.0, texelSize.y)).r;
-  float dSu = texture(tSourceSDF, vUv + vec2(0.0, texelSize.y)).r;
-  vec2 gradS = vec2(dSr - dSl, dSu - dSd);
 
-  float dTl = texture(tTargetSDF, vUv - vec2(texelSize.x, 0.0)).r;
-  float dTr = texture(tTargetSDF, vUv + vec2(texelSize.x, 0.0)).r;
-  float dTd = texture(tTargetSDF, vUv - vec2(0.0, texelSize.y)).r;
-  float dTu = texture(tTargetSDF, vUv + vec2(0.0, texelSize.y)).r;
-  vec2 gradT = vec2(dTr - dTl, dTu - dTd);
+  vec2 sourceGradient = vec2(
+    sourceSDF(vUv + RIGHT * texelSize) - sourceSDF(vUv + LEFT  * texelSize),
+    sourceSDF(vUv + UP    * texelSize) - sourceSDF(vUv + DOWN  * texelSize)
+  );
 
-  gradS = length(gradS) > 0.001 ? normalize(gradS) : vec2(0.0);
-  gradT = length(gradT) > 0.001 ? normalize(gradT) : vec2(0.0);
+  vec2 targetGradient = vec2(
+    targetSDF(vUv + RIGHT * texelSize) - targetSDF(vUv + LEFT  * texelSize),
+    targetSDF(vUv + UP    * texelSize) - targetSDF(vUv + DOWN  * texelSize)
+  );
 
-  vec2 unifiedVector = mix(gradS, gradT, mixAmount);
-  
-  float warpIntensity = 0.15;
-  float warpStrength = abs(morphedDistance) * warpIntensity;
-  
+  sourceGradient = length(sourceGradient) > 0.001 ? normalize(sourceGradient) : vec2(0.0);
+  targetGradient = length(targetGradient) > 0.001 ? normalize(targetGradient) : vec2(0.0);
+
+  vec2 unifiedVector = mix(sourceGradient, targetGradient, mixAmount);
+  float warpStrength = abs(morphedDistance) * 0.15;
+
   vec2 uvSource = vUv + (unifiedVector * warpStrength * mixAmount) / uResolution.x;
   vec2 uvTarget = vUv - (unifiedVector * warpStrength * (1.0 - mixAmount)) / uResolution.x;
 
-  float lodSource = clamp(abs(distT * mixAmount) * 0.5, 0.0, 5.0);
-  float lodTarget = clamp(abs(distS * (1.0 - mixAmount)) * 0.5, 0.0, 5.0);
+  float blurRadiusSource = clamp(abs(distT * mixAmount) * 0.5, 0.0, maxBlurRadius);
+  float blurRadiusTarget = clamp(abs(distS * (1.0 - mixAmount)) * 0.5, 0.0, maxBlurRadius);
 
-  vec4 colorSource = textureLod(tSourceTexture, uvSource, lodSource);
-  vec4 colorTarget = textureLod(tTargetTexture, uvTarget, lodTarget);
+  vec4 colorSource = pseudoKawase(tSourceTexture, uvSource, blurRadiusSource, uResolution);
+  vec4 colorTarget = pseudoKawase(tTargetTexture, uvTarget, blurRadiusTarget, uResolution);
+
   vec4 finalColor = mix(colorSource, colorTarget, mixAmount);
-
   gl_FragColor = vec4(finalColor.rgb * finalAlpha, 1.0);
 }
 `
