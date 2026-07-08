@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import modelUrl from './mesh.glb?url';
 import loadMesh from './loader';
 import defaultVertexShader from './default.vert?raw';
+import assignMaskMaterial from './mask';
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 
 
@@ -16,9 +17,6 @@ const clock = new THREE.Clock();
 const screenCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const screenScene = new THREE.Scene();
 
-const renderTargetSource = new THREE.WebGLRenderTarget(width, height);
-const renderTargetTarget = new THREE.WebGLRenderTarget(width, height);
-
 const scene3D = new THREE.Scene();
 const camera3D = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
 camera3D.position.set(0, 0, 5);
@@ -27,44 +25,39 @@ const light = new THREE.DirectionalLight(0xffffff, 1);
 light.position.set(2, 2, 5);
 scene3D.add(light, new THREE.AmbientLight(0x404040));
 
-const whiteMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
 
-// const sourceGeometry = new THREE.TorusGeometry(1, 0.2, 16, 48);
 
-// const sourceGeometry = new THREE.BoxGeometry(1, 1, 1);
-// const sourceMesh = new THREE.Mesh(sourceGeometry, whiteMaterial);
-
-const sourceMesh = await loadMesh(modelUrl);
-
-sourceMesh.traverse((child) => {
-  if (!child.isMesh) return;
-
-  if (child.material) {
-    if (Array.isArray(child.material)) {
-      child.material.forEach(mat => mat.dispose());
-      return;
-    }
-    child.material.dispose();
-  }
-
-  // Assign the plain white material
-  child.material = whiteMaterial;
-});
-
-sourceMesh.rotation.set(0.3, 0.25, 0);
-
-const targetGeometry = new THREE.IcosahedronGeometry(1.2, 1);
-const targetMesh = new THREE.Mesh(targetGeometry, whiteMaterial);
-
-function renderToBuffer(mesh, target) {
+function renderToBuffer(mesh) {
+  const buf = new THREE.WebGLRenderTarget(width, height, {
+    minFilter: THREE.LinearMipmapLinearFilter,
+    magFilter: THREE.LinearFilter,
+    generateMipmaps: true
+  });
   scene3D.add(mesh);
-  renderer.setRenderTarget(target);
+  renderer.setRenderTarget(buf);
   renderer.render(scene3D, camera3D);
   scene3D.remove(mesh);
+  return buf;
 }
 
-renderToBuffer(sourceMesh, renderTargetSource);
-renderToBuffer(targetMesh, renderTargetTarget);
+// const sourceGeometry = new THREE.TorusGeometry(1, 0.3, 12, 48);
+
+// const sourceGeometry = new THREE.BoxGeometry(1, 1, 1);
+// const sourceMesh = new THREE.Mesh(sourceGeometry, new THREE.MeshStandardMaterial({ color: 0xf19ec8 }));
+const sourceMesh = await loadMesh(modelUrl);
+const targetGeometry = new THREE.IcosahedronGeometry(1.2, 1);
+const targetMesh = new THREE.Mesh(targetGeometry, new THREE.MeshStandardMaterial({ color: 0xffa500, flatShading: true }));
+sourceMesh.rotation.set(0.3, 0.25, 0);
+
+const sourceTex = renderToBuffer(sourceMesh);
+const targetTex = renderToBuffer(targetMesh);
+
+assignMaskMaterial(sourceMesh);
+assignMaskMaterial(targetMesh);
+
+
+const renderTargetSource = renderToBuffer(sourceMesh);
+const renderTargetTarget = renderToBuffer(targetMesh);
 
 // createOutlineArrayTexture extracts outlines and saves them to a 512x512 texture array
 function createOutlineArrayTexture(renderTarget) {
@@ -181,38 +174,71 @@ bakeSDF(tTargetOutlineArray, renderTargetTarget, rtTargetSDF);
 
 tSourceOutlineArray.dispose();
 tTargetOutlineArray.dispose();
-renderTargetSource.dispose();
-renderTargetTarget.dispose();
 
 const screenShaderMaterial = new THREE.ShaderMaterial({
   uniforms: {
     tSourceSDF: { value: rtSourceSDF.texture },
     tTargetSDF: { value: rtTargetSDF.texture },
+    uResolution: { value: new THREE.Vector2(width, height) },
+    tSourceTexture: { value: sourceTex.texture },
+    tTargetTexture: { value: targetTex.texture },
     mixAmount: { value: 0.0 }
   },
   vertexShader: defaultVertexShader,
-  fragmentShader: `
-    uniform sampler2D tSourceSDF;
-    uniform sampler2D tTargetSDF; 
-    uniform float mixAmount;
-    varying vec2 vUv;
+  fragmentShader: `uniform sampler2D tSourceSDF;
+uniform sampler2D tTargetSDF; 
+uniform sampler2D tSourceTexture;
+uniform sampler2D tTargetTexture;
+uniform float mixAmount;
+uniform vec2 uResolution;
+varying vec2 vUv;
 
-    void main() {
-      float distS = texture2D(tSourceSDF, vUv).r;
-      float distT = texture2D(tTargetSDF, vUv).r;
 
-      float morphedDistance = mix(distS, distT, mixAmount);
+void main() {
 
-      
-      // float finalAlpha = morphedDistance < 0.001 ? 1.0 : 0.;
-      // the code below is equivalent to the above + anti aliasing
-      
-      float delta = fwidth(morphedDistance);
-      float epsilon = 0.001; 
-      float finalAlpha = smoothstep(epsilon + delta, epsilon - delta, morphedDistance);
-      gl_FragColor = vec4(vec3(finalAlpha), 1.0);
-    }
-  `
+  float distS = texture(tSourceSDF, vUv).r;
+  float distT = texture(tTargetSDF, vUv).r;
+
+  float morphedDistance = mix(distS, distT, mixAmount);
+  float delta = fwidth(morphedDistance);
+  float epsilon = 0.001; 
+  float finalAlpha = smoothstep(epsilon + delta, epsilon - delta, morphedDistance);
+
+  vec2 texelSize = 1.5 / uResolution;
+  
+  float dSl = texture(tSourceSDF, vUv - vec2(texelSize.x, 0.0)).r;
+  float dSr = texture(tSourceSDF, vUv + vec2(texelSize.x, 0.0)).r;
+  float dSd = texture(tSourceSDF, vUv - vec2(0.0, texelSize.y)).r;
+  float dSu = texture(tSourceSDF, vUv + vec2(0.0, texelSize.y)).r;
+  vec2 gradS = vec2(dSr - dSl, dSu - dSd);
+
+  float dTl = texture(tTargetSDF, vUv - vec2(texelSize.x, 0.0)).r;
+  float dTr = texture(tTargetSDF, vUv + vec2(texelSize.x, 0.0)).r;
+  float dTd = texture(tTargetSDF, vUv - vec2(0.0, texelSize.y)).r;
+  float dTu = texture(tTargetSDF, vUv + vec2(0.0, texelSize.y)).r;
+  vec2 gradT = vec2(dTr - dTl, dTu - dTd);
+
+  gradS = length(gradS) > 0.001 ? normalize(gradS) : vec2(0.0);
+  gradT = length(gradT) > 0.001 ? normalize(gradT) : vec2(0.0);
+
+  vec2 unifiedVector = mix(gradS, gradT, mixAmount);
+  
+  float warpIntensity = 0.15;
+  float warpStrength = abs(morphedDistance) * warpIntensity;
+  
+  vec2 uvSource = vUv + (unifiedVector * warpStrength * mixAmount) / uResolution.x;
+  vec2 uvTarget = vUv - (unifiedVector * warpStrength * (1.0 - mixAmount)) / uResolution.x;
+
+  float lodSource = clamp(abs(distT * mixAmount) * 0.5, 0.0, 5.0);
+  float lodTarget = clamp(abs(distS * (1.0 - mixAmount)) * 0.5, 0.0, 5.0);
+
+  vec4 colorSource = textureLod(tSourceTexture, uvSource, lodSource);
+  vec4 colorTarget = textureLod(tTargetTexture, uvTarget, lodTarget);
+  vec4 finalColor = mix(colorSource, colorTarget, mixAmount);
+
+  gl_FragColor = vec4(finalColor.rgb * finalAlpha, 1.0);
+}
+`
 });
 
 const toScreenQuad = new FullScreenQuad(screenShaderMaterial);
